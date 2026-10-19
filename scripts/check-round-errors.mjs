@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { createLogger } from '../packages/logging/src/index.cjs';
+const diagnostics = createLogger("scripts.check-round-errors");
 /**
  * Keep contracts/round/ERRORS.md in sync with enum Error in
  * contracts/round/src/types.rs.
@@ -13,8 +15,35 @@ import { pathToFileURL } from "node:url";
 
 const DEFAULT_TYPES = "contracts/round/src/types.rs";
 const DEFAULT_DOC = "contracts/round/ERRORS.md";
+const DEFAULT_SDK = "packages/sdk/src/errors.ts";
 
 /** @typedef {{ name: string, code: number }} ErrorVariant */
+
+/**
+ * @param {string} content
+ * @returns {ErrorVariant[]}
+ */
+export function parseSdkErrors(content) {
+  const enumMatch = content.match(
+    /export const ROUND_CONTRACT_ERRORS[^{]*\{([\s\S]*?)\n\}\);/,
+  );
+  if (!enumMatch) {
+    throw new Error("Could not find `ROUND_CONTRACT_ERRORS` in errors.ts");
+  }
+
+  /** @type {ErrorVariant[]} */
+  const variants = [];
+  for (const line of enumMatch[1].split("\n")) {
+    const match = line.match(/^\s*(\d+):\s*\{\s*code:\s*(\d+),\s*name:\s*"(\w+)"/);
+    if (match) {
+      variants.push({ name: match[3], code: Number(match[2]) });
+    }
+  }
+  if (variants.length === 0) {
+    throw new Error("No Error variants parsed from errors.ts");
+  }
+  return variants;
+}
 
 /**
  * @param {string} content
@@ -106,41 +135,54 @@ function loadFile(pathArg, fallback) {
 function main() {
   const typesPath = process.argv[2] || DEFAULT_TYPES;
   const docPath = process.argv[3] || DEFAULT_DOC;
+  const sdkPath = process.argv[4] || DEFAULT_SDK;
 
   const typesFile = loadFile(typesPath, DEFAULT_TYPES);
   const docFile = loadFile(docPath, DEFAULT_DOC);
+  const sdkFile = loadFile(sdkPath, DEFAULT_SDK);
 
   if (typesFile.content === null) {
-    console.error(`[FAIL] types file not found: ${typesFile.path}`);
+    diagnostics.error("fail-types-file-not-found", `[FAIL] types file not found: ${typesFile.path}`);
     process.exit(1);
   }
   if (docFile.content === null) {
-    console.error(`[FAIL] ERRORS.md not found: ${docFile.path}`);
+    diagnostics.error("fail-errors-md-not-found", `[FAIL] ERRORS.md not found: ${docFile.path}`);
     process.exit(1);
   }
 
   const fromTypes = parseTypesRs(typesFile.content);
   const fromDoc = parseErrorsMd(docFile.content);
 
-  console.log(`\nRound contract error drift check`);
-  console.log("=".repeat(72));
-  console.log(`  types.rs : ${fromTypes.length} variants`);
-  console.log(`  ERRORS.md: ${fromDoc.length} rows`);
+  diagnostics.info("round-contract-error-drift-check", `\nRound contract error drift check`);
+  diagnostics.info("progress", "=".repeat(72));
+  diagnostics.info("types-rs", `  types.rs : ${fromTypes.length} variants`);
+  diagnostics.info("errors-md", `  ERRORS.md: ${fromDoc.length} rows`);
 
   const failures = diffVariants(fromTypes, fromDoc, "types.rs", "ERRORS.md");
-  console.log("=".repeat(72));
+
+  if (sdkFile.content !== null) {
+    const fromSdk = parseSdkErrors(sdkFile.content);
+    diagnostics.info("sdk-errors", `  SDK errors: ${fromSdk.length} variants`);
+    failures.push(...diffVariants(fromTypes, fromSdk, "types.rs", "errors.ts"));
+  }
+
+  diagnostics.info("progress-2", "=".repeat(72));
 
   if (failures.length === 0) {
-    console.log("PASS  types.rs and ERRORS.md list the same error codes.");
+    diagnostics.info(
+      "pass-types-rs-and-errors-md-list-the-same-error-codes",
+      "PASS  types.rs, ERRORS.md, and SDK list the same error codes.",
+    );
     process.exit(0);
   }
 
-  console.error(`FAIL  ${failures.length} drift issue(s):`);
+  diagnostics.error("fail", `FAIL  ${failures.length} drift issue(s):`);
   for (const failure of failures) {
-    console.error(`  - ${failure}`);
+    diagnostics.error("progress-3", `  - ${failure}`);
   }
-  console.error(
-    "\nUpdate contracts/round/src/types.rs and contracts/round/ERRORS.md together.",
+  diagnostics.error(
+    "update-contracts-round-src-types-rs-and-contracts-round",
+    "\nUpdate contracts/round/src/types.rs, contracts/round/ERRORS.md, and packages/sdk/src/errors.ts together.",
   );
   process.exit(1);
 }

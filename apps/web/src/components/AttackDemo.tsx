@@ -1,9 +1,10 @@
+import { publicErrorMessage } from "@sub-rosa/logging/errors";
 // Copyright (c) 2026 Sub Rosa contributors
 import { useState } from "react";
 import type { AttackStep } from "../lib/demoTypes";
 import { useToast } from "../ui/Toast";
 
-function StepList({ steps, variant }: { steps: AttackStep[]; variant: "bad" | "good" }) {
+export function StepList({ steps, variant }: { steps: AttackStep[]; variant: "bad" | "good" }) {
   return (
     <ul className={`attack-steps ${variant}`}>
       {steps.map((s) => (
@@ -19,7 +20,26 @@ function StepList({ steps, variant }: { steps: AttackStep[]; variant: "bad" | "g
   );
 }
 
-export function AttackDemo() {
+/** The leaky "seal off" column body — withheld until the reveal round opens. */
+export function SealOffColumn({
+  steps,
+  revealOpen,
+}: {
+  steps: AttackStep[] | null;
+  revealOpen: boolean;
+}) {
+  if (steps && revealOpen) return <StepList steps={steps} variant="bad" />;
+  if (steps) {
+    return (
+      <p className="placeholder">
+        Bids still sealed — values hidden until Drand R opens the reveal round.
+      </p>
+    );
+  }
+  return <p className="placeholder">Run demo</p>;
+}
+
+export function AttackDemo({ phase = "Reveal" }: { phase?: "Open" | "Reveal" | "Settled" }) {
   const toast = useToast();
   const [loading, setLoading] = useState(false);
   const [sealOff, setSealOff] = useState<AttackStep[] | null>(null);
@@ -44,7 +64,7 @@ export function AttackDemo() {
         `Seal-off leaks early · seal-on waits for R=${res.revealRound.toLocaleString()}`,
       );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = publicErrorMessage(e);
       setErr(msg);
       toast.dismiss(workingId);
       toast.push("error", "Attack demo failed", msg);
@@ -52,6 +72,13 @@ export function AttackDemo() {
       setLoading(false);
     }
   }
+
+  // The demo never renders a revealed value while the shared round-phase
+  // helper says the reveal round is still sealed — regardless of what the
+  // attack steps computed. Seal-on columns stay visible (they only ever show
+  // the commitment hash and step status); the seal-off column, which exists
+  // to leak, is withheld until the phase says reveal has opened.
+  const revealOpen = phase !== "Open";
 
   return (
     <section className="panel attack-panel">
@@ -82,7 +109,7 @@ export function AttackDemo() {
           <p className="attack-sub">
             Bid stored in reversible form. Observer reads early. Losing bidder can abort.
           </p>
-          {sealOff ? <StepList steps={sealOff} variant="bad" /> : <p className="placeholder">Run demo</p>}
+          <SealOffColumn steps={sealOff} revealOpen={revealOpen} />
         </div>
         <div className="attack-col good">
           <h3>Seal ON — Sub Rosa + Drand tlock</h3>

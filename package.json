@@ -4,6 +4,10 @@
   "private": true,
   "description": "Escrow-backed sealed auction infrastructure for Stellar.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sub-Rosa-Issue/sub-rosa-issue.git"
+  },
   "packageManager": "pnpm@10.13.1",
   "engines": {
     "node": ">=22"
@@ -21,6 +25,8 @@
     }
   },
   "scripts": {
+    "logging:test": "pnpm --filter @sub-rosa/logging test && node --test scripts/check-logging.test.mjs",
+    "logging:check": "node scripts/check-logging.mjs",
     "contract:build": "stellar contract build",
     "contract:test": "cargo test -p sub-rosa-round",
     "errors:check": "node scripts/check-round-errors.mjs",
@@ -69,14 +75,14 @@
     "docs:check": "node scripts/check-deploy-docs.mjs",
     "docs:check-links": "node scripts/check-links.js",
     "coverage:test": "node --test scripts/run-ts-coverage.test.mjs && node scripts/run-ts-coverage.mjs",
-    "tlock:typecheck": "pnpm --filter @sub-rosa/tlock typecheck",
     "drand:test": "pnpm --filter @sub-rosa/drand-tools test",
     "drand:typecheck": "pnpm --filter @sub-rosa/drand-tools typecheck",
     "receipt:test": "pnpm --filter @sub-rosa/receipt-cli test",
     "receipt:typecheck": "pnpm --filter @sub-rosa/receipt-cli typecheck",
-    "template:test": "pnpm --filter @sub-rosa/auction-template test",
     "time:test": "pnpm --filter @sub-rosa/time test",
     "time:guard": "node scripts/check-direct-time-access.mjs",
-    "time:guard:test": "node --test scripts/check-direct-time-access.test.mjs"
+    "time:guard:test": "node --test scripts/check-direct-time-access.test.mjs",
+    "errors:normalize:check": "node scripts/check-error-normalization.mjs",
+    "errors:normalize:test": "pnpm --filter @sub-rosa/logging test && node --test scripts/check-error-normalization.test.mjs"
   }
 }

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Sub Rosa contributors
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createFakeTime } from "@sub-rosa/time";
@@ -14,7 +15,7 @@ test("errorMatches detects idempotent contract error codes in any shape", () => 
 
 test("errorName extracts a readable message", () => {
   assert.equal(errorName(new Error("boom")), "boom");
-  assert.equal(errorName({ message: "x" }), JSON.stringify({ message: "x" }));
+  assert.equal(errorName({ message: "x" }), "x");
 });
 
 test("waitForRound returns false for a future round when not allowed to wait", async () => {

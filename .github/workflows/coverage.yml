@@ -17,6 +17,7 @@ concurrency:
 jobs:
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +32,17 @@ jobs:
 
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Validate structured logging
+        run: pnpm logging:test && pnpm logging:check
+
+      - name: Validate error normalization
+        run: pnpm errors:normalize:test && pnpm errors:normalize:check
+
+      - name: Mainnet readiness matches the committed manifest (recorded fixture, no RPC, no secrets)
+        run: |
+          pnpm --filter @sub-rosa/sdk exec tsx scripts/mainnet-ready.ts --strict --fixture
+          pnpm --filter @sub-rosa/sdk exec tsx scripts/mainnet-verify.ts --fixture
 
       - name: Run coverage gate
         run: pnpm coverage:test

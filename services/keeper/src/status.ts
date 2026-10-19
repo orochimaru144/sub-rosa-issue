@@ -1,4 +1,7 @@
+import { normalizeError, publicErrorMessage } from "@sub-rosa/logging/errors";
 // Copyright (c) 2026 Sub Rosa contributors
+import { createLogger, type Logger } from '@sub-rosa/logging';
+const diagnostics = createLogger("services.keeper.src.status");
 import type { SubRosaClient } from "@sub-rosa/sdk";
 import { fetchRoundSignature, type DrandClient } from "@sub-rosa/tlock";
 import {
@@ -10,6 +13,7 @@ import {
 } from "@sub-rosa/time";
 
 import { decideKeeperDryRunAction, type KeeperDryRunPhase } from "./dry-run.js";
+import { VOID_GRACE_SECONDS, type GuardSkipRecord } from "./settlement-guard.js";
 import type { WatchedRound } from "./store.js";
 
 export type RoundStatus =
@@ -23,10 +27,18 @@ export type RoundStatus =
 
 export type SettlementIndicator = "pending" | "submitted" | "terminal" | "none";
 
+/** One-line rendering of a guard refusal, e.g. `settle refused: refund_missing`. */
+export function guardSkipIndicator(skip: GuardSkipRecord | null): string | null {
+  if (!skip) return null;
+  return `${skip.action} refused: ${skip.reason}`;
+}
+
 export interface RoundStatusView {
   roundId: string;
   status: RoundStatus;
   phase: KeeperDryRunPhase;
+  cursor: number | string | null;
+  lastHash: string | null;
   nextAction: string;
   commitDeadline: number | null;
   revealDeadline: number | null;
@@ -41,6 +53,13 @@ export interface RoundStatusView {
   winningValue: string | null;
   clearingRule: "HighestBid" | "LowestBid" | null;
   settlement: SettlementIndicator;
+  /**
+   * The last contract rule the settlement guard refused, if any: a round held
+   * back because submitting it would have been rejected on-chain.
+   */
+  guardSkip: GuardSkipRecord | null;
+  /** {@link guardSkipIndicator} for `guardSkip` — compact, log-friendly. */
+  guardSkipIndicator: string | null;
   lastKeeperAction: string | null;
   lastError: string | null;
   retryCount: number;
@@ -73,9 +92,11 @@ export interface BuildRoundStatusArgs {
   clock?: Clock;
   settlement?: SettlementIndicator;
   watched?: WatchedRound;
+  guardSkip?: GuardSkipRecord | null;
 }
 
 export interface BuildStatusSource {
+  logger?: Logger;
   reader: StatusReader;
   drand: DrandClient;
   storeRounds: () => WatchedRound[];
@@ -84,11 +105,11 @@ export interface BuildStatusSource {
   epochMs?: number;
   nowSeconds?: number;
   settleIndicator?: (roundId: bigint) => SettlementIndicator;
+  /** Typed reason the settlement guard last refused, for each round. */
+  guardSkip?: (roundId: bigint) => GuardSkipRecord | null;
   /** Injectable wall clock. Default: systemClock. */
   time?: PartialTimeContext;
 }
-
-const VOID_GRACE_SECONDS = 3600;
 
 async function countRevealed(
   reader: StatusReader,
@@ -112,17 +133,20 @@ export async function buildRoundStatus(
   const clock = args.clock ?? systemClock;
   const nowSeconds = args.nowSeconds ?? clock.nowSeconds();
   const ridStr = roundId.toString();
+  const guardSkip = args.guardSkip ?? null;
 
   let round;
   try {
     round = await reader.getRound(roundId);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = normalizeError(e).message;
     const notFound = /RoundNotFound/i.test(msg);
     return {
       roundId: ridStr,
       status: notFound ? "NotFound" : "Unknown",
-      phase: notFound ? "complete" : "awaiting-drand",
+      phase: watched?.phase ?? (notFound ? "complete" : "awaiting-drand"),
+      cursor: watched?.cursor ?? null,
+      lastHash: watched?.lastHash ?? null,
       nextAction: notFound ? "round does not exist" : "awaiting first keeper tick",
       commitDeadline: null,
       revealDeadline: null,
@@ -137,8 +161,10 @@ export async function buildRoundStatus(
       winningValue: null,
       clearingRule: null,
       settlement,
+      guardSkip,
+      guardSkipIndicator: guardSkipIndicator(guardSkip),
       lastKeeperAction: watched?.lastAction ?? null,
-      lastError: watched?.lastError ?? null,
+      lastError: watched?.lastError ? publicErrorMessage(watched.lastError) : null,
       retryCount: watched?.retryCount ?? 0,
       updatedAt: clock.toISOString(),
     };
@@ -179,7 +205,9 @@ export async function buildRoundStatus(
   return {
     roundId: ridStr,
     status,
-    phase: phase.currentPhase,
+    phase: watched?.phase ?? phase.currentPhase,
+    cursor: watched?.cursor ?? null,
+    lastHash: watched?.lastHash ?? null,
     nextAction: phase.nextAction,
     commitDeadline,
     revealDeadline,
@@ -194,8 +222,10 @@ export async function buildRoundStatus(
     winningValue: round.winning_bid == null ? null : round.winning_bid.toString(),
     clearingRule: round.clearing_rule?.tag ?? null,
     settlement: settlementIndicator,
+    guardSkip,
+    guardSkipIndicator: guardSkipIndicator(guardSkip),
     lastKeeperAction: watched?.lastAction ?? null,
-    lastError: watched?.lastError ?? null,
+    lastError: watched?.lastError ? publicErrorMessage(watched.lastError) : null,
     retryCount: watched?.retryCount ?? 0,
     updatedAt: clock.toISOString(),
   };
@@ -221,12 +251,13 @@ export async function buildKeeperStatus(source: BuildStatusSource): Promise<Keep
     contractId,
     network,
     settleIndicator,
+    guardSkip,
     epochMs,
     nowSeconds,
   } = source;
 
   const { clock } = resolveTimeContext(systemTime, source.time);
-  const health = await checkHealth(reader, drand, clock);
+  const health = await checkHealth(reader, drand, clock, source.logger);
   const nowMs = clock.nowMs();
   const startedAt = epochMs ?? nowMs;
   const watched = storeRounds();
@@ -241,6 +272,7 @@ export async function buildKeeperStatus(source: BuildStatusSource): Promise<Keep
         nowSeconds,
         clock,
         settlement: settleIndicator?.(BigInt(w.roundId)) ?? "none",
+        guardSkip: guardSkip?.(BigInt(w.roundId)) ?? null,
       }),
     ),
   );
@@ -278,6 +310,7 @@ export async function checkHealth(
   reader: StatusReader,
   drand: DrandClient,
   clock: Clock = systemClock,
+  logger: Logger = diagnostics,
 ): Promise<KeeperServiceHealth> {
   let rpc: "ok" | "degraded" | "down" = "ok";
   let drandStatus: "ok" | "degraded" | "down" = "ok";
@@ -288,12 +321,12 @@ export async function checkHealth(
   } catch (e) {
     // A valid health probe can legitimately return RoundNotFound; that still
     // proves the RPC endpoint is reachable and returning well-formed errors.
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = normalizeError(e).message;
     if (/RoundNotFound|NotInitialized/i.test(msg)) {
       // healthy-enough: reachable
     } else {
       rpc = "down";
-      console.error("[keeper-health] rpc probe failed:", msg);
+      logger.error("keeper-health-rpc-probe-failed", "[keeper-health] rpc probe failed:", { error: normalizeError(e) });
       reasons.push("rpc: unavailable");
     }
   }
@@ -302,8 +335,8 @@ export async function checkHealth(
     await drand.chain().info();
   } catch (e) {
     drandStatus = "down";
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error("[keeper-health] drand probe failed:", msg);
+    const msg = normalizeError(e).message;
+    logger.error("keeper-health-drand-probe-failed", "[keeper-health] drand probe failed:", { error: normalizeError(e) });
     reasons.push("drand: unavailable");
   }
 

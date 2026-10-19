@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Sub Rosa contributors
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createFakeTime } from "@sub-rosa/time";
@@ -8,6 +9,7 @@ import {
   checkHealth,
   type BuildStatusSource,
 } from "./status.js";
+import type { GuardSkipRecord } from "./settlement-guard.js";
 import type { WatchedRound } from "./store.js";
 
 const TEST_NOW_SECONDS = createFakeTime(1_700_000_000_000).clock.nowSeconds();
@@ -264,6 +266,59 @@ describe("buildRoundStatus — settled round", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Settlement guard refusal (Issue #385)
+// ---------------------------------------------------------------------------
+
+describe("buildRoundStatus — settlement guard refusal", () => {
+  it("surfaces the typed reason the guard refused to submit", async () => {
+    const now = TEST_NOW_SECONDS;
+    const skip: GuardSkipRecord = {
+      action: "settle",
+      reason: "refund_missing",
+      detail: "escrow for GBBB is unreadable; its refund cannot be verified",
+      at: "2026-09-30T00:00:00.000Z",
+    };
+    const source = makeSource({
+      reader: readerOk({
+        status: "Cleared",
+        revealRound: 1,
+        commitDeadline: now - 7200,
+        revealDeadline: now - 3600,
+        bidders: ["GAAA", "GBBB"],
+        winner: "GAAA",
+        winningBid: 700n,
+      }),
+      storeRounds: () => [
+        { roundId: "4", lastStatus: "Cleared", retryCount: 0 },
+      ] as WatchedRound[],
+      settleIndicator: () => "pending",
+      guardSkip: (roundId) => (roundId === 4n ? skip : null),
+    });
+
+    const res = await buildKeeperStatus(source);
+    const r = res.rounds[0];
+    assert.deepEqual(r.guardSkip, skip, "the full refusal record is served");
+    assert.equal(
+      r.guardSkipIndicator,
+      "settle refused: refund_missing",
+      "the compact indicator names the action and the typed reason",
+    );
+  });
+
+  it("reports no refusal when the guard let the submission through", async () => {
+    const source = makeSource({
+      storeRounds: () => [
+        { roundId: "5", lastStatus: "Cleared", retryCount: 0 },
+      ] as WatchedRound[],
+      guardSkip: () => null,
+    });
+    const res = await buildKeeperStatus(source);
+    assert.equal(res.rounds[0].guardSkip, null);
+    assert.equal(res.rounds[0].guardSkipIndicator, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Upstream failure states
 // ---------------------------------------------------------------------------
 
@@ -323,7 +378,7 @@ describe("buildKeeperStatus — upstream failure", () => {
     assert.equal(res.rounds.length, 1);
     const r = res.rounds[0];
     assert.equal(r.status, "NotFound");
-    assert.equal(r.lastError, "rpc connection refused");
+    assert.equal(r.lastError, "The operation could not be completed. Please try again or contact support.");
     assert.equal(r.retryCount, 1);
   });
 
@@ -343,7 +398,7 @@ describe("buildKeeperStatus — upstream failure", () => {
     assert.equal(res.rounds.length, 1);
     const r = res.rounds[0];
     assert.equal(r.status, "Unknown");
-    assert.equal(r.lastError, "rpc connection refused");
+    assert.equal(r.lastError, "The operation could not be completed. Please try again or contact support.");
     assert.equal(r.retryCount, 2);
   });
 });

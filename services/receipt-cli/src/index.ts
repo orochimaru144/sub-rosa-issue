@@ -1,5 +1,8 @@
 #!/usr/bin/env node
+import { normalizeError } from "@sub-rosa/logging/errors";
 // Copyright (c) 2026 Sub Rosa contributors
+import { createLogger, writeData } from '@sub-rosa/logging';
+const diagnostics = createLogger("services.receipt-cli.src.index");
 // receipt-cli — export a round receipt from RPC or verify a local file.
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -8,11 +11,16 @@ import { SubRosaClient, parseReceipt, serializeReceipt, verifyReceipt, redactRec
 import { buildJsonOutput } from "./json-output.js";
 
 function usage(): never {
-  console.error(`
+  diagnostics.error("usage-receipt-cli-export-roundid-fetch-receipt-from-rpc", `
 Usage:
   receipt-cli export <roundId>             Fetch receipt from RPC (uses env config)
-  receipt-cli verify <receipt.json>        Verify a local receipt file
+  receipt-cli verify <receipt.json> [--json] [--verify-artifact-checksum <artifact-file>]
   receipt-cli redact <receipt.json> [out]  Redact sensitive fields for public demo
+
+Options for "verify":
+  --json                                  Print machine-readable verification output
+  --verify-artifact-checksum <artifact-file>
+                                          Verify the checksum of the required artifact file
 
 Environment for "export":
   RPC_URL                  Soroban RPC endpoint (default: https://soroban-testnet.stellar.org)
@@ -29,7 +37,7 @@ async function cmdExport(roundIdStr: string) {
     process.env.NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
   const contractId = process.env.CONTRACT_ID;
   if (!contractId) {
-    console.error("CONTRACT_ID env var is required for export");
+    diagnostics.error("contract-id-env-var-is-required-for-export", "CONTRACT_ID env var is required for export");
     process.exit(1);
   }
 
@@ -38,7 +46,7 @@ async function cmdExport(roundIdStr: string) {
   const json = serializeReceipt(receipt);
   const filename = `round-${roundId}-receipt.json`;
   writeFileSync(filename, json, "utf-8");
-  console.log(`Wrote ${filename}`);
+  diagnostics.info("wrote", `Wrote ${filename}`);
 }
 
 async function cmdVerify(path: string, jsonMode: boolean, artifactPath?: string) {
@@ -47,9 +55,12 @@ async function cmdVerify(path: string, jsonMode: boolean, artifactPath?: string)
     rawJson = readFileSync(path, "utf-8");
   } catch (e) {
     if (jsonMode) {
-      console.log(JSON.stringify(buildJsonOutput(null, null, `Cannot read file: ${e}`), null, 2));
+      writeData(JSON.stringify(buildJsonOutput(null, null, {
+        code: "parse_error",
+        message: `Cannot read file: ${normalizeError(e).message}`,
+      }), null, 2));
     } else {
-      console.error(`Cannot read ${path}: ${e}`);
+      diagnostics.error("cannot-read", `Cannot read ${path}: ${normalizeError(e).message}`);
     }
     process.exit(1);
   }
@@ -59,9 +70,12 @@ async function cmdVerify(path: string, jsonMode: boolean, artifactPath?: string)
     receipt = parseReceipt(rawJson);
   } catch (e) {
     if (jsonMode) {
-      console.log(JSON.stringify(buildJsonOutput(null, null, `Invalid JSON: ${e}`), null, 2));
+      writeData(JSON.stringify(buildJsonOutput(null, null, {
+        code: "parse_error",
+        message: `Invalid JSON: ${normalizeError(e).message}`,
+      }), null, 2));
     } else {
-      console.error(`Invalid JSON: ${e}`);
+      diagnostics.error("invalid-json", `Invalid JSON: ${normalizeError(e).message}`);
     }
     process.exit(1);
   }
@@ -74,7 +88,7 @@ async function cmdVerify(path: string, jsonMode: boolean, artifactPath?: string)
       const data = readFileSync(artifactPath);
       computedChecksum = createHash("sha256").update(data).digest("hex");
     } catch (e: any) {
-      const message = `Cannot read artifact file: ${e.message}`;
+      const message = `Cannot read artifact file: ${normalizeError(e).message}`;
       result.valid = false;
       result.issues.push({
         severity: "error",
@@ -83,9 +97,9 @@ async function cmdVerify(path: string, jsonMode: boolean, artifactPath?: string)
         path: artifactPath,
       });
       if (jsonMode) {
-        console.log(JSON.stringify(buildJsonOutput(receipt, result, null), null, 2));
+        writeData(JSON.stringify(buildJsonOutput(receipt, result, null), null, 2));
       } else {
-        console.error(`Error: ${message}`);
+        diagnostics.error("error", `Error: ${message}`);
       }
       process.exit(1);
     }
@@ -99,9 +113,9 @@ async function cmdVerify(path: string, jsonMode: boolean, artifactPath?: string)
         message,
       });
       if (jsonMode) {
-        console.log(JSON.stringify(buildJsonOutput(receipt, result, null), null, 2));
+        writeData(JSON.stringify(buildJsonOutput(receipt, result, null), null, 2));
       } else {
-        console.error(`Error: ${message}`);
+        diagnostics.error("error-2", `Error: ${message}`);
       }
       process.exit(1);
     }
@@ -115,30 +129,30 @@ async function cmdVerify(path: string, jsonMode: boolean, artifactPath?: string)
         message,
       });
       if (jsonMode) {
-        console.log(JSON.stringify(buildJsonOutput(receipt, result, null), null, 2));
+        writeData(JSON.stringify(buildJsonOutput(receipt, result, null), null, 2));
       } else {
-        console.error(`Error: ${message}`);
+        diagnostics.error("error-3", `Error: ${message}`);
       }
       process.exit(1);
     }
   }
 
   if (jsonMode) {
-    console.log(JSON.stringify(buildJsonOutput(receipt, result, null), null, 2));
+    writeData(JSON.stringify(buildJsonOutput(receipt, result, null), null, 2));
     process.exit(result.valid ? 0 : 1);
   }
 
   const status = result.valid ? "PASS" : "FAIL";
-  console.log(`Verification: ${status}`);
+  diagnostics.info("verification", `Verification: ${status}`);
   if (artifactPath && result.valid) {
-    console.log("Artifact verification: PASS");
+    diagnostics.info("artifact-verification-pass", "Artifact verification: PASS");
   }
-  console.log(`Computed winner: ${result.computedWinner.address ?? "(none)"} = ${result.computedWinner.value ?? "(none)"}`);
+  diagnostics.info("computed-winner", `Computed winner: ${result.computedWinner.address ?? "(none)"} = ${result.computedWinner.value ?? "(none)"}`);
 
   for (const issue of result.issues) {
     const icon = issue.severity === "error" ? "✖" : "⚠";
     const pathStr = issue.path ? ` [${issue.path}]` : "";
-    console.log(`  ${icon} [${issue.code}]${pathStr} ${issue.message}`);
+    diagnostics.info("progress-7", `  ${icon} [${issue.code}]${pathStr} ${issue.message}`);
   }
 
   process.exit(result.valid ? 0 : 1);
@@ -149,7 +163,7 @@ async function cmdRedact(inputPath: string, outputPath?: string) {
   try {
     json = readFileSync(inputPath, "utf-8");
   } catch (e) {
-    console.error(`Cannot read ${inputPath}: ${e}`);
+    diagnostics.error("cannot-read-2", `Cannot read ${inputPath}: ${normalizeError(e).message}`);
     process.exit(1);
   }
 
@@ -157,7 +171,7 @@ async function cmdRedact(inputPath: string, outputPath?: string) {
   try {
     receipt = parseReceipt(json);
   } catch (e) {
-    console.error(`Invalid JSON: ${e}`);
+    diagnostics.error("invalid-json-2", `Invalid JSON: ${normalizeError(e).message}`);
     process.exit(1);
   }
 
@@ -165,7 +179,7 @@ async function cmdRedact(inputPath: string, outputPath?: string) {
   const out = serializeReceipt(redacted);
   const outPath = outputPath ?? inputPath.replace(/\.json$/, ".redacted.json");
   writeFileSync(outPath, out, "utf-8");
-  console.log(`Wrote redacted receipt to ${outPath}`);
+  diagnostics.info("wrote-redacted-receipt-to", `Wrote redacted receipt to ${outPath}`);
 }
 
 async function main() {
@@ -211,6 +225,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e);
+  diagnostics.error("progress-8", normalizeError(e));
   process.exit(1);
 });

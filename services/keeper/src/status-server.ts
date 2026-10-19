@@ -1,4 +1,7 @@
+import { normalizeError, publicErrorMessage } from "@sub-rosa/logging/errors";
 // Copyright (c) 2026 Sub Rosa contributors
+import { createLogger, type Logger } from '@sub-rosa/logging';
+const diagnostics = createLogger("services.keeper.src.status-server");
 import http from "node:http";
 
 import type { DrandClient } from "@sub-rosa/tlock";
@@ -8,6 +11,7 @@ import type { StatusReader } from "./status.js";
 import { buildKeeperStatus, type BuildStatusSource } from "./status.js";
 
 export interface StatusServerConfig {
+  logger?: Logger;
   host?: string;
   port?: number;
   contractId: string;
@@ -16,6 +20,8 @@ export interface StatusServerConfig {
   drand: DrandClient;
   storeRounds: () => import("./store.js").WatchedRound[];
   settleIndicator?: (roundId: bigint) => import("./status.js").SettlementIndicator;
+  /** Typed settlement-guard refusal for a round, if the guard held it back. */
+  guardSkip?: (roundId: bigint) => import("./settlement-guard.js").GuardSkipRecord | null;
   epochMs?: number;
 }
 
@@ -28,7 +34,10 @@ interface Route {
   ) => Promise<{ status: number; body: unknown }>;
 }
 
-const JSON_CONTENT = { "content-type": "application/json" };
+const JSON_CONTENT = {
+  "content-type": "application/json",
+  "cache-control": "no-store",
+};
 
 function send(
   res: http.ServerResponse,
@@ -56,6 +65,7 @@ function makeRoutes(src: BuildStatusSource): Route[] {
     network: src.network,
     epochMs: src.epochMs,
     settleIndicator: src.settleIndicator,
+    guardSkip: src.guardSkip,
   });
 
   return [
@@ -140,8 +150,8 @@ function healthzHandler(
         },
       };
     } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
-      console.error("[keeper-healthz] health check failed:", detail);
+      const detail = normalizeError(e).message;
+      (src.logger ?? diagnostics).error("keeper-healthz-health-check-failed", "[keeper-healthz] health check failed:", { "detail_0": detail });
       return {
         status: 503,
         body: {
@@ -154,24 +164,26 @@ function healthzHandler(
   };
 }
 
-export function createStatusServer(config: StatusServerConfig): http.Server {
+export function createStatusHandler(config: StatusServerConfig): http.RequestListener {
   const host = config.host ?? process.env.KEEPER_STATUS_HOST ?? "127.0.0.1";
   const port = config.port ?? Number(process.env.KEEPER_STATUS_PORT ?? "8090");
 
   const source: BuildStatusSource = {
+    logger: config.logger,
     reader: config.reader,
     drand: config.drand,
     storeRounds: config.storeRounds,
     contractId: config.contractId,
     network: config.network,
     settleIndicator: config.settleIndicator,
+    guardSkip: config.guardSkip,
     epochMs: config.epochMs ?? systemClock.nowMs(),
   };
 
   const dynamic = makeRoutes(source);
   const fastHealth = healthzHandler(source);
 
-  const server = http.createServer((req, res) => {
+  return (req, res) => {
     try {
       const baseHost = req.headers.host ?? `${host}:${port}`;
       const url = new URL(req.url ?? "/", `http://${baseHost}`);
@@ -197,12 +209,20 @@ export function createStatusServer(config: StatusServerConfig): http.Server {
         .then((body) => match.handler(url, body))
         .then((r) => send(res, r.status, r.body))
         .catch((e) => {
-          send(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          (config.logger ?? diagnostics).error("request-failed", normalizeError(e));
+          send(res, 500, { error: publicErrorMessage(e) });
         });
     } catch (e) {
-      send(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      (config.logger ?? diagnostics).error("request-failed", normalizeError(e));
+      send(res, 500, { error: publicErrorMessage(e) });
     }
-  });
+  };
+}
+
+export function createStatusServer(config: StatusServerConfig): http.Server {
+  const host = config.host ?? process.env.KEEPER_STATUS_HOST ?? "127.0.0.1";
+  const port = config.port ?? Number(process.env.KEEPER_STATUS_PORT ?? "8090");
+  const server = http.createServer(createStatusHandler(config));
 
   // Stash socket hints so tests / callers can probe the bound address server-side
   server.once("listening", () => {
